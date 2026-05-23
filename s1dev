@@ -1,4 +1,4 @@
-MachoMenuNotification("S1Dev", "S1Dev Menu\n\nCapsLock to open menu")
+MachoMenuNotification("S1Dev", "S1Dev Menu\n\nCapsLock to open menu | F5 for Freecam")
 
 local function isResourceRunning(resourceName)
     return GetResourceState(resourceName) == "started"
@@ -14,9 +14,8 @@ local bp = setmetatable({}, {
 -- ============================================================
 --   FEATURES
 -- ============================================================
-local noclipActive = false
-local noclipSpeed = 7.0
-local noclipThread = nil
+local noclipBasic = false
+local noclipSpeed = 1.0
 
 local godmodeActive = false
 local superJumpActive = false
@@ -24,67 +23,176 @@ local fastRunActive = false
 local invisibleActive = false
 
 -- ============================================================
---   NOCLIP FUNCTION
+--   FREECAM SYSTEM (from propsupdate.lua)
 -- ============================================================
+local freecamActive = false
+local freecamCam = nil
+local freecamPitch = 0.0
+local freecamYaw = 0.0
+local freecamSpeed = 7.0
+
+local function StartFreecam()
+    if freecamCam then DestroyCam(freecamCam, false) end
+    freecamCam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
+    local coords = GetEntityCoords(PlayerPedId())
+    SetCamCoord(freecamCam, coords.x, coords.y, coords.z)
+    freecamYaw = GetGameplayCamRot(2).z
+    freecamPitch = 0.0
+    SetCamRot(freecamCam, freecamPitch, 0.0, freecamYaw, 2)
+    SetCamActive(freecamCam, true)
+    RenderScriptCams(true, true, 500, true, false, false)
+    FreezeEntityPosition(PlayerPedId(), true)
+    SetEntityVisible(PlayerPedId(), false, false)
+    freecamActive = true
+    MachoMenuNotification("S1Dev", "Freecam ~g~ENABLED~w~ (WASD + Space/Ctrl to fly)")
+    print("^2[S1Dev]^7 Freecam ENABLED")
+end
+
+local function StopFreecam()
+    if freecamCam then
+        RenderScriptCams(false, true, 500, true, false, false)
+        DestroyCam(freecamCam, false)
+        freecamCam = nil
+    end
+    FreezeEntityPosition(PlayerPedId(), false)
+    SetEntityVisible(PlayerPedId(), true, false)
+    freecamActive = false
+    MachoMenuNotification("S1Dev", "Freecam ~r~DISABLED")
+    print("^2[S1Dev]^7 Freecam DISABLED")
+end
+
+local function ToggleFreecam()
+    if freecamActive then
+        StopFreecam()
+    else
+        StartFreecam()
+    end
+end
+
+-- Freecam update thread
+Citizen.CreateThread(function()
+    while true do
+        Citizen.Wait(0)
+        if freecamActive and freecamCam then
+            -- Mouse controls
+            local mouseX = GetDisabledControlNormal(0, 1) or 0
+            local mouseY = GetDisabledControlNormal(0, 2) or 0
+            freecamYaw = freecamYaw - mouseX * 6.0
+            freecamPitch = freecamPitch - mouseY * 6.0
+            if freecamPitch > 89.0 then freecamPitch = 89.0 end
+            if freecamPitch < -89.0 then freecamPitch = -89.0 end
+            SetCamRot(freecamCam, freecamPitch, 0.0, freecamYaw, 2)
+
+            -- Movement
+            local forward = vector3(
+                -math.sin(math.rad(freecamYaw)) * math.cos(math.rad(freecamPitch)),
+                math.cos(math.rad(freecamYaw)) * math.cos(math.rad(freecamPitch)),
+                math.sin(math.rad(freecamPitch))
+            )
+            local right = vector3(
+                math.cos(math.rad(freecamYaw)),
+                math.sin(math.rad(freecamYaw)),
+                0
+            )
+            local up = vector3(0, 0, 1)
+            local move = vector3(0, 0, 0)
+            
+            if IsControlPressed(0, 32) then move = move + forward end      -- W
+            if IsControlPressed(0, 33) then move = move - forward end      -- S
+            if IsControlPressed(0, 34) then move = move - right end        -- A
+            if IsControlPressed(0, 35) then move = move + right end        -- D
+            if IsControlPressed(0, 22) then move = move + up end           -- Space
+            if IsControlPressed(0, 36) then move = move - up end           -- Ctrl
+
+            local speed = freecamSpeed
+            if IsControlPressed(0, 21) then speed = speed * 2.5 end        -- Shift
+
+            if move.x ~= 0 or move.y ~= 0 or move.z ~= 0 then
+                move = move / math.sqrt(move.x^2 + move.y^2 + move.z^2)
+                local currentPos = GetCamCoord(freecamCam)
+                SetCamCoord(freecamCam,
+                    currentPos.x + move.x * speed,
+                    currentPos.y + move.y * speed,
+                    currentPos.z + move.z * speed)
+            end
+        end
+    end
+end)
+
+-- F5 key for freecam
+Citizen.CreateThread(function()
+    while true do
+        Citizen.Wait(0)
+        if IsControlJustPressed(0, 166) then -- F5 key (0x74 is F4, 0x75 is F5)
+            ToggleFreecam()
+        end
+    end
+end)
+
+-- ============================================================
+--   NOCLIP FUNCTION (Improved)
+-- ============================================================
+local noclipThread = nil
+
 local function StartNoclip()
     if noclipThread then return end
     noclipThread = Citizen.CreateThread(function()
-        while noclipActive do
+        while noclipBasic do
             Citizen.Wait(0)
             local ped = PlayerPedId()
-            local inVeh = IsPedInAnyVehicle(ped, false)
-            local entity = inVeh and GetVehiclePedIsIn(ped, false) or ped
+            local speed = noclipSpeed
+            if IsControlPressed(0, 21) then speed = speed * 3 end
             
-            local heading = GetGameplayCamRelativeHeading() + GetEntityHeading(ped)
-            local pitch = GetGameplayCamRelativePitch()
-            local rh = heading * 0.01745329
-            local rp = pitch * 0.01745329
-            local dx = -math.sin(rh) * math.cos(rp)
-            local dy = math.cos(rh) * math.cos(rp)
-            local dz = math.sin(rp)
+            local camRot = GetGameplayCamRot(2)
+            local lastCoords = GetEntityCoords(ped)
             
-            local spd = noclipSpeed * 0.05
-            if IsControlPressed(0, 21) then spd = spd * 3.0 end
+            local forward = vector3(
+                -math.sin(math.rad(camRot.z)) * math.cos(math.rad(camRot.x)),
+                math.cos(math.rad(camRot.z)) * math.cos(math.rad(camRot.x)),
+                math.sin(math.rad(camRot.x))
+            )
+            local right = vector3(
+                math.cos(math.rad(camRot.z)),
+                math.sin(math.rad(camRot.z)),
+                0.0
+            )
             
-            local c = GetEntityCoords(entity)
-            local nx, ny, nz = c.x, c.y, c.z
+            if IsDisabledControlPressed(0, 32) then lastCoords = lastCoords + forward * speed end
+            if IsDisabledControlPressed(0, 33) then lastCoords = lastCoords - forward * speed end
+            if IsDisabledControlPressed(0, 30) then lastCoords = lastCoords - right * speed end
+            if IsDisabledControlPressed(0, 34) then lastCoords = lastCoords + right * speed end
+            if IsDisabledControlPressed(0, 22) then lastCoords = lastCoords + vector3(0, 0, speed) end
+            if IsDisabledControlPressed(0, 36) then lastCoords = lastCoords - vector3(0, 0, speed) end
             
-            if IsControlPressed(0, 32) then
-                nx = nx + dx * spd
-                ny = ny + dy * spd
-                nz = nz + dz * spd
+            if IsPedInAnyVehicle(ped, false) then
+                local veh = GetVehiclePedIsIn(ped, false)
+                SetEntityCollision(veh, false, false)
+                FreezeEntityPosition(veh, true)
+                SetEntityCoordsNoOffset(veh, lastCoords.x, lastCoords.y, lastCoords.z, true, true, true)
+                SetEntityRotation(veh, camRot.x, 0.0, camRot.z, 2, true)
+                FreezeEntityPosition(veh, false)
+                SetEntityCollision(veh, true, true)
+            else
+                SetEntityCoordsNoOffset(ped, lastCoords.x, lastCoords.y, lastCoords.z, true, true, true)
+                SetEntityRotation(ped, camRot.x, 0.0, camRot.z, 2, true)
             end
-            if IsControlPressed(0, 33) then
-                nx = nx - dx * spd
-                ny = ny - dy * spd
-                nz = nz - dz * spd
-            end
-            if IsControlPressed(0, 22) then
-                nz = nz + spd
-            end
-            if IsControlPressed(0, 36) then
-                nz = nz - spd
-            end
-            
-            SetEntityCoordsNoOffset(entity, nx, ny, nz, true, true, true)
-            SetEntityVelocity(entity, 0.0, 0.0, 0.0)
-            SetEntityVisible(entity, false, false)
-            SetLocalPlayerVisibleLocally(false)
         end
         noclipThread = nil
     end)
 end
 
 local function ToggleNoclip()
-    noclipActive = not noclipActive
+    if freecamActive then
+        MachoMenuNotification("S1Dev", "~r~Disable freecam first!")
+        return
+    end
+    noclipBasic = not noclipBasic
     
-    if noclipActive then
+    if noclipBasic then
         StartNoclip()
-        MachoMenuNotification("S1Dev", "Noclip ~g~ENABLED~w~ (WASD + Space/Ctrl)")
-        print("^2[S1Dev]^7 Noclip ENABLED")
+        MachoMenuNotification("S1Dev", "Noclip ~g~ENABLED~w~ (WASD + Space/Ctrl to fly)")
+        print("^2[S1Dev]^7 Noclip ENABLED - Speed: " .. noclipSpeed)
     else
-        SetEntityVisible(PlayerPedId(), true, false)
-        SetLocalPlayerVisibleLocally(true)
         MachoMenuNotification("S1Dev", "Noclip ~r~DISABLED")
         print("^2[S1Dev]^7 Noclip DISABLED")
     end
@@ -314,9 +422,9 @@ local function UniversalACBypass()
 end
 
 -- ============================================================
---   MENU SYSTEM (Based on working Storm template)
+--   MENU SYSTEM
 -- ============================================================
-local MenuSize = vec2(480, 360) 
+local MenuSize = vec2(480, 420) 
 local screenW, screenH = GetActiveScreenResolution()
 local MenuStartCoords = vec2(screenW / 2 - MenuSize.x / 2, screenH / 2 - MenuSize.y / 2)
 local TabsBarWidth = 120.0
@@ -341,7 +449,7 @@ end
 -- Create window
 MenuWindow = MachoMenuTabbedWindow('S1Dev', MenuStartCoords.x, MenuStartCoords.y, MenuSize.x, MenuSize.y, TabsBarWidth)
 MachoMenuSmallText(MenuWindow, "User: " .. (authenticatedUser or "S1Dev User"))
-MachoMenuSetAccent(MenuWindow, 30, 144, 255) -- Blue accent
+MachoMenuSetAccent(MenuWindow, 30, 144, 255)
 local MenuKeybind = MachoMenuSetKeybind(MenuWindow, 0x14) -- CapsLock
 
 -- ============================================================
@@ -350,8 +458,19 @@ local MenuKeybind = MachoMenuSetKeybind(MenuWindow, 0x14) -- CapsLock
 local MainTab = MachoMenuAddTab(MenuWindow, 'Main')
 local MainSection = MachoMenuGroup(MainTab, 'S1Dev Features', GetSectionCoords(1, 1, 2, 2))
 
+MachoMenuButton(MainSection, 'Freecam [F5]', function()
+    ToggleFreecam()
+end)
+
 MachoMenuButton(MainSection, 'Noclip [TOGGLE]', function()
     ToggleNoclip()
+end)
+
+MachoMenuSlider(MainSection, "Noclip Speed", noclipSpeed, 0, 25, "", 1, function(Value)
+    noclipSpeed = Value
+    if noclipBasic then
+        print("^2[S1Dev]^7 Noclip Speed updated to: " .. Value)
+    end
 end)
 
 MachoMenuButton(MainSection, 'Godmode [TOGGLE]', function()
@@ -508,5 +627,6 @@ end)
 print("^2[S1Dev]^7 ========================================")
 print("^2[S1Dev]^7 Menu Loaded Successfully!")
 print("^2[S1Dev]^7 Press CapsLock to open menu")
-print("^2[S1Dev]^7 Features: Noclip, Godmode, Crash, Bypass")
+print("^2[S1Dev]^7 Press F5 to toggle Freecam")
+print("^2[S1Dev]^7 Features: Freecam, Noclip, Godmode, Crash, Bypass")
 print("^2[S1Dev]^7 ========================================")
